@@ -5235,6 +5235,7 @@ public class Channel implements Serializable {
         NOfEvents nOfEvents;
         User userContext;
         boolean failFast = true;
+        boolean sendToAllOrderers = false;
 
         /**
          * Fail fast when there is an invalid transaction received on the eventing peer being observed.
@@ -5314,6 +5315,20 @@ public class Channel implements Serializable {
         public TransactionOptions orderers(Collection<Orderer> orderers) {
             return orderers(orderers.toArray(new Orderer[orderers.size()]));
         }
+
+        /**
+         * Send transaction to all orderers in set or to only one.
+         * Sending transaction to more that one orderer in any consensus (Solo, Kafka, Raft) type except BFT will ends in transaction duplication.
+         * Default set to false
+         *
+         * @param sendToAllOrderers
+         * @return This TransactionOptions
+         */
+        public TransactionOptions sendToAllOrderers(boolean sendToAllOrderers) {
+            this.sendToAllOrderers = sendToAllOrderers;
+            return this;
+        }
+
     }
 
     /**
@@ -5661,7 +5676,7 @@ public class Channel implements Serializable {
             }
 
             logger.debug(format("Channel %s sending transaction to orderer(s) with TxID %s ", name, proposalTransactionID));
-            boolean success = false;
+            int successCount = 0;
             Exception lException = null; // Save last exception to report to user .. others are just logged.
 
             BroadcastResponse resp = null;
@@ -5681,8 +5696,11 @@ public class Channel implements Serializable {
                     resp = orderer.sendTransaction(transactionEnvelope);
                     lException = null; // no longer last exception .. maybe just failed.
                     if (resp.getStatus() == Status.SUCCESS) {
-                        success = true;
-                        break;
+                        successCount++;
+                        if (!transactionOptions.sendToAllOrderers) {
+                            break;
+                        }
+                        failed = null;
                     } else {
                         logger.warn(format("Channel %s %s failed. Status returned %s", name, orderer, getRespData(resp)));
                     }
@@ -5702,9 +5720,9 @@ public class Channel implements Serializable {
 
             }
 
-            if (success) {
-                logger.debug(format("Channel %s successful sent to Orderer transaction id: %s",
-                        name, proposalTransactionID));
+            if (successCount > 0) {
+                logger.debug(format("Channel %s successful sent to %s Orderers transaction id: %s",
+                        name, successCount, proposalTransactionID));
                 if (replyonly) {
                     sret.complete(null); // just say we're done.
                 }
