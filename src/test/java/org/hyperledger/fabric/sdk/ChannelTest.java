@@ -36,6 +36,7 @@ import java.util.concurrent.TimeUnit;
 import com.google.protobuf.ByteString;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
+import org.hamcrest.CoreMatchers;
 import org.hyperledger.fabric.protos.common.Common;
 import org.hyperledger.fabric.protos.orderer.Ab;
 import org.hyperledger.fabric.protos.peer.Chaincode;
@@ -46,14 +47,12 @@ import org.hyperledger.fabric.sdk.exception.InvalidArgumentException;
 import org.hyperledger.fabric.sdk.exception.PeerException;
 import org.hyperledger.fabric.sdk.exception.ProposalException;
 import org.hyperledger.fabric.sdk.exception.TransactionException;
+import org.hyperledger.fabric.sdk.helper.Config;
 import org.hyperledger.fabric.sdk.security.CryptoSuite;
 import org.hyperledger.fabric.sdk.testutils.TestUtils;
 import org.hyperledger.fabric.sdk.transaction.InstallProposalBuilder;
 import org.hyperledger.fabric.sdk.transaction.TransactionContext;
-import org.junit.Assert;
-import org.junit.BeforeClass;
-import org.junit.Rule;
-import org.junit.Test;
+import org.junit.*;
 import org.junit.rules.ExpectedException;
 import sun.misc.Unsafe;
 
@@ -64,10 +63,7 @@ import static org.hyperledger.fabric.sdk.testutils.TestUtils.getMockUser;
 import static org.hyperledger.fabric.sdk.testutils.TestUtils.matchesRegex;
 import static org.hyperledger.fabric.sdk.testutils.TestUtils.setField;
 import static org.hyperledger.fabric.sdk.testutils.TestUtils.tarBytesToEntryArrayList;
-import static org.junit.Assert.assertArrayEquals;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.*;
 
 //CHECKSTYLE.ON: IllegalImport
 
@@ -117,6 +113,11 @@ public class ChannelTest {
             Assert.fail("Unexpected Exception " + e.getMessage());
 
         }
+    }
+
+    @Before
+    public void setTest() throws NoSuchFieldException, IllegalAccessException {
+        customizeConfig();
     }
 
     @Test
@@ -1261,6 +1262,71 @@ public class ChannelTest {
 
     }
 
+    @Test
+    public void testSendTransactionOneOrderer() throws Exception {
+        Ab.BroadcastResponse broadcastResponse = Ab.BroadcastResponse.newBuilder().setStatusValue(200).build();
+        Channel channel = hfclient.newChannel("CFTChannel1");
+        channel.addOrderer(new OrdererMock(broadcastResponse,"o1", "grpc://localhost:100", null));
+        channel.addOrderer(new OrdererMock(broadcastResponse,"o2", "grpc://localhost:100", null));
+        Channel.TransactionOptions transactionOptions = new Channel.TransactionOptions();
+        transactionOptions.userContext(hfclient.getUserContext()).orderers(channel.getOrderers());
+
+        OrdererMock.sendInvocation = 0;
+        try {
+            channel.initialize();
+            channel.sendTransaction(generateProposalResponses(channel), transactionOptions);
+        } catch (Throwable e) {
+            e.printStackTrace();
+        }
+
+        assertThat(OrdererMock.sendInvocation, CoreMatchers.is(1));
+    }
+
+    @Test
+    public void testSendTransactionAllOrderers() throws Exception {
+        Ab.BroadcastResponse broadcastResponse = Ab.BroadcastResponse.newBuilder().setStatusValue(200).build();
+        Channel channel = hfclient.newChannel("CFTChannel2");
+        channel.addOrderer(new OrdererMock(broadcastResponse,"o1", "grpc://localhost:100", null));
+        channel.addOrderer(new OrdererMock(broadcastResponse,"o2", "grpc://localhost:100", null));
+        Channel.TransactionOptions transactionOptions = new Channel.TransactionOptions();
+        transactionOptions.userContext(hfclient.getUserContext()).orderers(channel.getOrderers()).sendToAllOrderers(true);
+
+        OrdererMock.sendInvocation = 0;
+        channel.initialize();
+        channel.sendTransaction(generateProposalResponses(channel), transactionOptions);
+
+        assertThat(OrdererMock.sendInvocation, CoreMatchers.is(2));
+
+        Config.getConfig();
+    }
+
+    Collection<ProposalResponse> generateProposalResponses(Channel channel) throws Exception{
+        TransactionContext transactionContext = new TransactionContext(channel, hfclient.getUserContext(), hfclient.getCryptoSuite());
+        Collection<ProposalResponse> proposalResponses = new ArrayList<>();
+        ProposalResponse resp = new ProposalResponse(transactionContext, 200, "");
+        FabricProposalResponse.Endorsement endorsement = FabricProposalResponse.Endorsement.newBuilder().setEndorser(ByteString.copyFromUtf8("asdf")).setSignature(ByteString.copyFromUtf8("asdf")).build();
+        FabricProposalResponse.Response response = FabricProposalResponse.Response.newBuilder().setPayload(ByteString.EMPTY).setMessage("").setStatus(200).build();
+        FabricProposalResponse.ProposalResponse fabricProposalResponse = FabricProposalResponse.ProposalResponse.newBuilder().setEndorsement(endorsement).setPayload(ByteString.EMPTY).setResponse(response).build();
+        FabricProposal.SignedProposal signedProposal = FabricProposal.SignedProposal.newBuilder().setProposalBytes(ByteString.EMPTY).setSignature(ByteString.EMPTY).build();
+        resp.setProposalResponse(fabricProposalResponse);
+        resp.setProposal(signedProposal);
+        proposalResponses.add(resp);
+        return proposalResponses;
+
+    }
+
+    public void customizeConfig()
+            throws NoSuchFieldException, SecurityException, IllegalArgumentException, IllegalAccessException {
+
+        Config config = Config.getConfig();
+        // Update sdkProperties map from argument
+        java.lang.reflect.Field sdkPropInstance = config.getClass().getDeclaredField("sdkProperties");
+        sdkPropInstance.setAccessible(true);
+        Properties sdkProperties = (Properties) sdkPropInstance.get(config);
+        sdkProperties.setProperty(Config.PROPOSAL_CONSISTENCY_VALIDATION, "false");
+    }
+
+
     class MockEndorserClient extends EndorserClient {
         final Throwable throwThis;
         private final CompletableFuture<FabricProposalResponse.ProposalResponse> returnedFuture;
@@ -1304,6 +1370,24 @@ public class ChannelTest {
             } catch (Exception e) {
                 throw new RuntimeException(e);
             }
+        }
+    }
+
+
+    public static class OrdererMock extends Orderer {
+
+        Ab.BroadcastResponse br;
+        static int sendInvocation;
+
+        OrdererMock(Ab.BroadcastResponse br, String name, String url, Properties properties) throws InvalidArgumentException {
+            super(name, url, properties);
+            this.br = br;
+        }
+
+        @Override
+        Ab.BroadcastResponse sendTransaction(Common.Envelope transaction) {
+            sendInvocation++;
+            return br;
         }
     }
 
