@@ -5720,7 +5720,10 @@ public class Channel implements Serializable {
 
             }
 
-            if (successCount > 0) {
+            boolean success = (!transactionOptions.sendToAllOrderers && successCount > 0);
+            success |= (transactionOptions.sendToAllOrderers && (2 * Math.floor(transactionOptions.orderers.size() / 3) + 1) <= successCount);
+
+            if (success) {
                 logger.debug(format("Channel %s successful sent to %s Orderers transaction id: %s",
                         name, successCount, proposalTransactionID));
                 if (replyonly) {
@@ -5729,7 +5732,7 @@ public class Channel implements Serializable {
                 return sret;
             } else {
 
-                String emsg = format("Channel %s failed to place transaction %s on Orderer. Cause: UNSUCCESSFUL. %s",
+                String emsg = format("Channel %s failed to place transaction %s on Orderers. Cause: UNSUCCESSFUL. %s",
                         name, proposalTransactionID, getRespData(resp));
 
                 unregisterTxListener(proposalTransactionID);
@@ -5748,6 +5751,14 @@ public class Channel implements Serializable {
 
     }
 
+    public CompletableFuture<TransactionEvent> sendTransactionToAllOrderers(Collection<? extends ProposalResponse> proposalResponses) {
+        User userContext = client.getUserContext();
+        Collection<Orderer> orderers = getOrderers();
+        if (orderers.isEmpty() && serviceDiscovery != null) {
+            serviceDiscovery.fullNetworkDiscovery(true);
+        }
+        return sendTransaction(proposalResponses, createTransactionOptions().orderers(orderers).userContext(userContext).sendToAllOrderers(true));
+    }
     /**
      * Build response details
      *

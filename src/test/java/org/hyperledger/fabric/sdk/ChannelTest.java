@@ -1266,8 +1266,10 @@ public class ChannelTest {
     public void testSendTransactionOneOrderer() throws Exception {
         Ab.BroadcastResponse broadcastResponse = Ab.BroadcastResponse.newBuilder().setStatusValue(200).build();
         Channel channel = hfclient.newChannel("CFTChannel1");
-        channel.addOrderer(new OrdererMock(broadcastResponse,"o1", "grpc://localhost:100", null));
+        channel.addOrderer(new OrdererMock(null,"o1", "grpc://localhost:100", null));
         channel.addOrderer(new OrdererMock(broadcastResponse,"o2", "grpc://localhost:100", null));
+        channel.addOrderer(new OrdererMock(null,"o3", "grpc://localhost:100", null));
+        channel.addOrderer(new OrdererMock(broadcastResponse,"o4", "grpc://localhost:100", null));
         Channel.TransactionOptions transactionOptions = new Channel.TransactionOptions();
         transactionOptions.userContext(hfclient.getUserContext()).orderers(channel.getOrderers());
 
@@ -1288,16 +1290,37 @@ public class ChannelTest {
         Channel channel = hfclient.newChannel("CFTChannel2");
         channel.addOrderer(new OrdererMock(broadcastResponse,"o1", "grpc://localhost:100", null));
         channel.addOrderer(new OrdererMock(broadcastResponse,"o2", "grpc://localhost:100", null));
+        channel.addOrderer(new OrdererMock(null,"o3", "grpc://localhost:100", null));
         Channel.TransactionOptions transactionOptions = new Channel.TransactionOptions();
         transactionOptions.userContext(hfclient.getUserContext()).orderers(channel.getOrderers()).sendToAllOrderers(true);
 
         OrdererMock.sendInvocation = 0;
         channel.initialize();
-        channel.sendTransaction(generateProposalResponses(channel), transactionOptions);
+        CompletableFuture<BlockEvent.TransactionEvent> sendTransaction = channel.sendTransaction(generateProposalResponses(channel), transactionOptions);
+        boolean sendFailed = false;
+        try {
+            sendTransaction.get(1000, TimeUnit.MILLISECONDS);
+        } catch (Exception e) {
+            sendFailed = true;
+        } finally {
+            assertTrue("sendTransactio should fail, not enough orederers", sendFailed);
+        }
 
         assertThat(OrdererMock.sendInvocation, CoreMatchers.is(2));
 
-        Config.getConfig();
+        OrdererMock.sendInvocation = 0;
+        channel.addOrderer(new OrdererMock(broadcastResponse,"o4", "grpc://localhost:100", null));
+        sendTransaction = channel.sendTransaction(generateProposalResponses(channel), transactionOptions.orderers(channel.getOrderers()));
+        sendFailed = false;
+        try {
+            sendTransaction.get(1000, TimeUnit.MILLISECONDS);
+        } catch (Exception e) {
+            sendFailed = true;
+        } finally {
+            assertFalse("sendTransactio should not fail, enough orederers", sendFailed);
+        }
+
+        assertThat(OrdererMock.sendInvocation, CoreMatchers.is(3));
     }
 
     Collection<ProposalResponse> generateProposalResponses(Channel channel) throws Exception{
@@ -1385,9 +1408,13 @@ public class ChannelTest {
         }
 
         @Override
-        Ab.BroadcastResponse sendTransaction(Common.Envelope transaction) {
-            sendInvocation++;
-            return br;
+        Ab.BroadcastResponse sendTransaction(Common.Envelope transaction) throws Exception {
+            if (br != null) {
+                sendInvocation++;
+                return br;
+            } else {
+                throw new Exception(BAD_STUFF);
+            }
         }
     }
 
